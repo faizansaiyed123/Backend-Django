@@ -74,20 +74,28 @@ def _point_at_mile(segments, markers, mile):
     return lat, lon
 
 
-def _project_station_to_route(station_lat, station_lon, segments, markers, approx_mile):
+def _project_station_to_route(
+    station_lat,
+    station_lon,
+    segments,
+    markers,
+    approx_mile,
+):
     """
     Project a station onto the nearest route segment around its coarse
     candidate position.
 
-    The initial candidate search uses 25-mile route samples for speed. This
-    second pass removes the sampling error from the station's route-mile
-    position before optimization.
+    Candidate discovery uses route samples for speed. This pass removes
+    sampling error before fuel-stop optimization.
     """
     if len(segments) < 2:
         return approx_mile, None
 
     window_miles = max(50.0, ROUTE_SAMPLE_INTERVAL_MILES * 2.5)
-    start = max(0, bisect_left(markers, approx_mile - window_miles) - 1)
+    start = max(
+        0,
+        bisect_left(markers, approx_mile - window_miles) - 1,
+    )
     end = min(
         len(segments) - 2,
         bisect_right(markers, approx_mile + window_miles),
@@ -140,9 +148,7 @@ def _project_station_to_route(station_lat, station_lon, segments, markers, appro
 
         if distance < best_distance:
             best_distance = distance
-            best_mile = (
-                a.mile + fraction * (b.mile - a.mile)
-            )
+            best_mile = a.mile + fraction * (b.mile - a.mile)
 
     return best_mile, best_distance
 
@@ -151,9 +157,9 @@ def find_stations_near_route(segments, total_distance_miles):
     """
     Find fuel stations near the route.
 
-    Candidate discovery is coarse and database-friendly; final station
-    position is projected onto the actual route geometry for accurate
-    optimization.
+    The database applies a route bounding box first. Candidate stations are
+    then checked against coarse route samples and finally projected onto the
+    actual route geometry for accurate route-mile and detour calculations.
     """
     if not segments:
         return []
@@ -250,12 +256,15 @@ def find_stations_near_route(segments, total_distance_miles):
 
 
 def _select_target(current_price, reachable_stations):
-    """Apply the standard greedy refueling decision."""
+    """
+    Select the next stop using the standard greedy refueling rule.
+
+    If a cheaper station is reachable within a full tank, use the first
+    cheaper station. Otherwise fill the current tank and skip to the
+    farthest reachable station.
+    """
     if current_price == float("inf"):
-        return max(
-            reachable_stations,
-            key=lambda item: item["mile"],
-        )
+        return max(reachable_stations, key=lambda item: item["mile"])
 
     cheaper = [
         item
@@ -264,14 +273,9 @@ def _select_target(current_price, reachable_stations):
     ]
 
     if cheaper:
-        # Take the first cheaper station. Going farther while buying more
-        # expensive fuel now cannot improve the cost-optimal solution.
         return min(cheaper, key=lambda item: item["mile"])
 
-    return max(
-        reachable_stations,
-        key=lambda item: item["mile"],
-    )
+    return max(reachable_stations, key=lambda item: item["mile"])
 
 
 def optimize(segments, total_distance_miles, stations_near_route):
@@ -300,6 +304,7 @@ def optimize(segments, total_distance_miles, stations_near_route):
     fuel = capacity_gallons
     current_price = float("inf")
     current_station = None
+    current_station_detour = 0.0
     total_gallons = 0.0
     total_cost = 0.0
 
@@ -327,23 +332,34 @@ def optimize(segments, total_distance_miles, stations_near_route):
             }
         )
 
-    current_station_detour = 0.0
-
     while True:
         remaining = total_distance_miles - position
-        reach_miles = fuel * mpg
+        current_reach = fuel * mpg
 
-        if remaining <= reach_miles + 1e-9:
+        if remaining <= current_reach + 1e-9:
             if current_station is not None:
-                buy_gallons = max(
-                    remaining / mpg - fuel,
-                    0.0,
-                )
+                buy_gallons = max(remaining / mpg - fuel, 0.0)
                 if buy_gallons > 1e-9:
                     fuel += buy_gallons
                     record_stop(buy_gallons)
             break
 
+        # If the destination is within one full tank from the current
+        # station, buy only what is needed to finish.
+        if current_station is not None and remaining <= max_range + 1e-9:
+            buy_gallons = max(remaining / mpg - fuel, 0.0)
+            if buy_gallons > capacity_gallons - fuel + 1e-9:
+                return None
+
+            if buy_gallons > 1e-9:
+                fuel += buy_gallons
+                record_stop(buy_gallons)
+            break
+
+        # For refueling decisions, evaluate all stations reachable with a
+        # full tank. This lets a cheaper station beyond current fuel reach
+        # be chosen by buying the additional amount at the current station.
+        decision_reach = max_range
         start_index = bisect_right(station_miles, position)
         reachable = []
 
@@ -351,27 +367,15 @@ def optimize(segments, total_distance_miles, stations_near_route):
             travel_miles = item["mile"] - position
             required_miles = travel_miles + 2.0 * item["detour"]
 
-            if required_miles <= reach_miles + 1e-9:
+            if required_miles <= decision_reach + 1e-9:
                 reachable.append(item)
-            elif item["mile"] > position and travel_miles > reach_miles:
+            elif item["mile"] > position and travel_miles > decision_reach:
                 break
 
         if not reachable:
-            if current_station is None:
-                return None
-
-            buy_gallons = capacity_gallons - fuel
-            if buy_gallons > 1e-9:
-                fuel += buy_gallons
-                record_stop(buy_gallons)
-                continue
-
             return None
 
-        target = _select_target(
-            current_price,
-            reachable,
-        )
+        target = _select_target(current_price, reachable)
 
         travel_miles = target["mile"] - position
         required_miles = travel_miles + 2.0 * target["detour"]
@@ -380,12 +384,12 @@ def optimize(segments, total_distance_miles, stations_near_route):
             target_price = float(target["station"].retail_price)
 
             if target_price < current_price:
-                buy_gallons = max(
-                    required_miles / mpg - fuel,
-                    0.0,
-                )
+                buy_gallons = max(required_miles / mpg - fuel, 0.0)
             else:
                 buy_gallons = capacity_gallons - fuel
+
+            if buy_gallons > capacity_gallons - fuel + 1e-9:
+                return None
 
             if buy_gallons > 1e-9:
                 fuel += buy_gallons
@@ -402,8 +406,4 @@ def optimize(segments, total_distance_miles, stations_near_route):
         current_station_detour = target["detour"]
         current_price = float(target["station"].retail_price)
 
-    return (
-        stops,
-        round(total_gallons, 4),
-        round(total_cost, 2),
-    )
+    return stops, round(total_gallons, 4), round(total_cost, 2)
