@@ -128,7 +128,7 @@ class OptimizerTests(TestCase):
 
         result = optimize(
             [],
-            500.0,
+            600.0,
             [candidate(station, 480, detour=10)],
         )
         self.assertIsNotNone(result)
