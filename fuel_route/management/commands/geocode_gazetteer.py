@@ -4,6 +4,7 @@ import tempfile
 
 import requests
 from django.core.management.base import BaseCommand
+from django.utils import timezone
 
 from fuel_route.models import FuelStation
 
@@ -51,7 +52,8 @@ class Command(BaseCommand):
             if not latlon:
                 continue
             station.latitude, station.longitude = latlon
-            station.save(update_fields=['latitude', 'longitude'])
+            station.geocoded_at = timezone.now()
+            station.save(update_fields=["latitude", "longitude", "geocoded_at"])
             updated += 1
 
         self.stdout.write(

@@ -1,43 +1,106 @@
-"""Routing via the free OSRM public server, with response caching."""
+"""Routing via OSRM with persistent response caching."""
+
+from datetime import timedelta
 
 import requests
+from django.utils import timezone
 
-from routeplanner.settings import EXTERNAL_REQUEST_TIMEOUT, OSRM_BASE_URL
+from fuel_route.models import RouteCache
+from routeplanner.settings import (
+    EXTERNAL_REQUEST_TIMEOUT,
+    OSRM_BASE_URL,
+    ROUTE_CACHE_TTL_SECONDS,
+)
 
 
-def get_route(start_lat, start_lon, end_lat, end_lon):
+def _cache_key(value):
+    return " ".join(value.strip().lower().split())
+
+
+def get_route(start_query, start_lat, start_lon, finish_query, end_lat, end_lon):
     """
-    Get driving route from OSRM.
+    Return (distance_miles, duration_seconds, geometry).
 
-    Returns (distance_miles, duration_seconds, geometry) where geometry is a
-    list of [lat, lon] pairs, or None if the request fails.
+    Identical trips are served from RouteCache for the configured TTL,
+    eliminating repeated OSRM requests.
     """
-    coords = f'{start_lon},{start_lat};{end_lon},{end_lat}'
-    url = f'{OSRM_BASE_URL}/route/v1/driving/{coords}'
-    params = {
-        'geometries': 'geojson',
-        'overview': 'full',
-        'steps': 'false',
-    }
+    start_key = _cache_key(start_query)
+    finish_key = _cache_key(finish_query)
+
+    cutoff = timezone.now() - timedelta(seconds=ROUTE_CACHE_TTL_SECONDS)
+    cached = (
+        RouteCache.objects
+        .filter(
+            start_query=start_key,
+            finish_query=finish_key,
+            created_at__gte=cutoff,
+        )
+        .first()
+    )
+
+    if cached:
+        return (
+            cached.distance_miles,
+            cached.duration_seconds,
+            cached.geometry,
+        )
+
+    coords = f"{start_lon},{start_lat};{end_lon},{end_lat}"
+    url = f"{OSRM_BASE_URL}/route/v1/driving/{coords}"
+
     try:
-        resp = requests.get(url, params=params, timeout=EXTERNAL_REQUEST_TIMEOUT)
+        response = requests.get(
+            url,
+            params={
+                "geometries": "geojson",
+                "overview": "full",
+                "steps": "false",
+            },
+            timeout=EXTERNAL_REQUEST_TIMEOUT,
+        )
     except requests.RequestException:
         return None
 
-    if resp.status_code != 200:
+    if response.status_code != 200:
         return None
 
-    data = resp.json()
-    routes = data.get('routes') or []
+    data = response.json()
+    routes = data.get("routes") or []
     if not routes:
         return None
 
     route = routes[0]
-    distance_meters = route.get('distance', 0)
-    duration_seconds = route.get('duration', 0)
-    geometry_coords = route.get('geometry', {}).get('coordinates', [])
-    # OSRM geometry is [lon, lat]; convert to [lat, lon].
-    geometry = [[point[1], point[0]] for point in geometry_coords]
+    distance_meters = float(route.get("distance") or 0)
+    duration_seconds = float(route.get("duration") or 0)
+    coordinates = route.get("geometry", {}).get("coordinates", [])
+
+    if len(coordinates) < 2:
+        return None
+
+    geometry = [
+        [point[1], point[0]]
+        for point in coordinates
+        if len(point) >= 2
+    ]
+
+    if len(geometry) < 2:
+        return None
 
     distance_miles = distance_meters / 1609.344
-    return (distance_miles, duration_seconds, geometry)
+
+    RouteCache.objects.update_or_create(
+        start_query=start_key,
+        finish_query=finish_key,
+        defaults={
+            "start_lat": start_lat,
+            "start_lon": start_lon,
+            "finish_lat": end_lat,
+            "finish_lon": end_lon,
+            "distance_miles": distance_miles,
+            "duration_seconds": duration_seconds,
+            "geometry": geometry,
+            "created_at": timezone.now(),
+        },
+    )
+
+    return distance_miles, duration_seconds, geometry

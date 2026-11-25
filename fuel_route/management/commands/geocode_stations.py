@@ -4,6 +4,7 @@ import time
 
 import requests
 from django.core.management.base import BaseCommand
+from django.utils import timezone
 
 from fuel_route.models import FuelStation, GeocodeCache
 from routeplanner.settings import (
@@ -12,6 +13,7 @@ from routeplanner.settings import (
     EXTERNAL_REQUEST_TIMEOUT,
     NOMINATIM_BASE_URL,
     NOMINATIM_REQUEST_DELAY_SECONDS,
+    NOMINATIM_USER_AGENT,
 )
 
 FALLBACK_STREET = '100 Main St'
@@ -62,7 +64,8 @@ class Command(BaseCommand):
                 coord = results.get(station.id)
                 if coord:
                     station.latitude, station.longitude = coord
-                    station.save(update_fields=['latitude', 'longitude'])
+                    station.geocoded_at = timezone.now()
+                    station.save(update_fields=["latitude", "longitude", "geocoded_at"])
                     applied += 1
             total_done += applied
             self.stdout.write(
@@ -90,7 +93,8 @@ class Command(BaseCommand):
             if coord:
                 for station in stations:
                     station.latitude, station.longitude = coord
-                    station.save(update_fields=['latitude', 'longitude'])
+                    station.geocoded_at = timezone.now()
+                    station.save(update_fields=["latitude", "longitude", "geocoded_at"])
                 done += len(stations)
             if index < len(combos) - 1:
                 time.sleep(NOMINATIM_REQUEST_DELAY_SECONDS)
@@ -160,7 +164,7 @@ class Command(BaseCommand):
             resp = requests.get(
                 f'{NOMINATIM_BASE_URL}/search',
                 params={'q': cache_key, 'format': 'json', 'limit': 1},
-                headers={'User-Agent': 'spotter-fuel-route-assessment/1.0'},
+                headers={'User-Agent': NOMINATIM_USER_AGENT},
                 timeout=20,
             )
         except requests.RequestException:
