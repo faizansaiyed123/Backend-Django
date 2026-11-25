@@ -99,6 +99,7 @@ def get_route(start_query, start_lat, start_lon, finish_query, end_lat, end_lon)
             "distance_miles": distance_miles,
             "duration_seconds": duration_seconds,
             "geometry": geometry,
+            "created_at": timezone.now(),
         },
     )
 
