@@ -168,8 +168,11 @@ def find_stations_near_route(segments, total_distance_miles):
     lons = [segment.lon for segment in segments]
 
     average_lat = sum(lats) / len(lats)
-    latitude_margin = STATION_SEARCH_RADIUS_MILES / 69.0
-    longitude_margin = STATION_SEARCH_RADIUS_MILES / (
+    coarse_search_radius = (
+        STATION_SEARCH_RADIUS_MILES + ROUTE_SAMPLE_INTERVAL_MILES / 2.0
+    )
+    latitude_margin = coarse_search_radius / 69.0
+    longitude_margin = coarse_search_radius / (
         69.0 * max(cos(radians(average_lat)), 0.1)
     )
 
@@ -228,7 +231,7 @@ def find_stations_near_route(segments, total_distance_miles):
 
         if (
             approximate_mile is None
-            or approximate_distance > STATION_SEARCH_RADIUS_MILES
+            or approximate_distance > coarse_search_radius
         ):
             continue
 
