@@ -339,30 +339,12 @@ def optimize(segments, total_distance_miles, stations_near_route):
         remaining = total_distance_miles - position
         current_reach = fuel * mpg
 
+        # Already enough fuel to finish; do not buy unnecessary fuel.
         if remaining <= current_reach + 1e-9:
-            if current_station is not None:
-                buy_gallons = max(remaining / mpg - fuel, 0.0)
-                if buy_gallons > 1e-9:
-                    fuel += buy_gallons
-                    record_stop(buy_gallons)
             break
 
-        # If the destination is within one full tank from the current
-        # station, buy only what is needed to finish.
-        if current_station is not None and remaining <= max_range + 1e-9:
-            buy_gallons = max(remaining / mpg - fuel, 0.0)
-            if buy_gallons > capacity_gallons - fuel + 1e-9:
-                return None
-
-            if buy_gallons > 1e-9:
-                fuel += buy_gallons
-                record_stop(buy_gallons)
-            break
-
-        # For refueling decisions, evaluate all stations reachable with a
-        # full tank. This lets a cheaper station beyond current fuel reach
-        # be chosen by buying the additional amount at the current station.
-        decision_reach = max_range
+        # Evaluate all stations reachable within a full tank. This is the
+        # decision horizon for the greedy optimizer.
         start_index = bisect_right(station_miles, position)
         reachable = []
 
@@ -370,35 +352,85 @@ def optimize(segments, total_distance_miles, stations_near_route):
             travel_miles = item["mile"] - position
             required_miles = travel_miles + 2.0 * item["detour"]
 
-            if required_miles <= decision_reach + 1e-9:
+            if required_miles <= max_range + 1e-9:
                 reachable.append(item)
-            elif item["mile"] > position and travel_miles > decision_reach:
+            elif item["mile"] > position and travel_miles > max_range:
                 break
 
-        if not reachable:
-            return None
-
-        target = _select_target(current_price, reachable)
-
-        travel_miles = target["mile"] - position
-        required_miles = travel_miles + 2.0 * target["detour"]
-
         if current_station is not None:
-            target_price = float(target["station"].retail_price)
+            cheaper = [
+                item
+                for item in reachable
+                if float(item["station"].retail_price) < current_price
+            ]
 
-            if target_price < current_price:
-                buy_gallons = max(required_miles / mpg - fuel, 0.0)
+            if cheaper:
+                # A cheaper station is available within one full tank. Take
+                # the first cheaper station and buy only enough to reach it.
+                target = min(cheaper, key=lambda item: item["mile"])
+                required_miles = (
+                    target["mile"]
+                    - position
+                    + 2.0 * target["detour"]
+                )
+                buy_gallons = max(
+                    required_miles / mpg - fuel,
+                    0.0,
+                )
+
+                if buy_gallons > capacity_gallons - fuel + 1e-9:
+                    return None
+
+                if buy_gallons > 1e-9:
+                    fuel += buy_gallons
+                    record_stop(buy_gallons)
+            elif remaining <= max_range + 1e-9:
+                # No cheaper station is available, and the destination is
+                # within one full tank. Buy only what is needed to finish.
+                buy_gallons = max(
+                    remaining / mpg - fuel,
+                    0.0,
+                )
+
+                if buy_gallons > capacity_gallons - fuel + 1e-9:
+                    return None
+
+                if buy_gallons > 1e-9:
+                    fuel += buy_gallons
+                    record_stop(buy_gallons)
+                break
             else:
-                buy_gallons = capacity_gallons - fuel
+                if not reachable:
+                    return None
 
-            if buy_gallons > capacity_gallons - fuel + 1e-9:
+                # No cheaper station exists within one full tank. Fill up
+                # and skip to the farthest reachable station.
+                buy_gallons = capacity_gallons - fuel
+                if buy_gallons > 1e-9:
+                    fuel += buy_gallons
+                    record_stop(buy_gallons)
+
+                target = max(
+                    reachable,
+                    key=lambda item: item["mile"],
+                )
+        else:
+            # The trip starts with a full tank. If it still cannot finish,
+            # skip to the farthest station reachable with that full tank.
+            if not reachable:
                 return None
 
-            if buy_gallons > 1e-9:
-                fuel += buy_gallons
-                record_stop(buy_gallons)
+            target = max(
+                reachable,
+                key=lambda item: item["mile"],
+            )
 
-        fuel -= required_miles / mpg
+        travel_miles = target["mile"] - position
+        consumption_miles = (
+            travel_miles + 2.0 * target["detour"]
+        )
+
+        fuel -= consumption_miles / mpg
 
         if fuel < -1e-9:
             return None
