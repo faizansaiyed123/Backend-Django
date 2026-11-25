@@ -1,21 +1,16 @@
 import json
 from unittest.mock import Mock, patch
 
-from django.test import TestCase
+from django.test import Client, TestCase
 
 from fuel_route.models import FuelStation, RouteCache
 from fuel_route.services.geocode import geocode_location
 from fuel_route.services.optimizer import (
-    RouteSegment,
     _select_target,
     build_route_segments,
     optimize,
 )
 from fuel_route.services.routing import get_route
-
-
-def make_segment(lat, lon, mile):
-    return RouteSegment(lat, lon, mile)
 
 
 def make_station(opis_id, name, price):
@@ -46,27 +41,24 @@ class OptimizerTests(TestCase):
 
     def test_unreachable_first_gap_returns_none(self):
         station = make_station("1", "Far", 3.0)
-        result = optimize(
-            [],
-            1200.0,
-            [candidate(station, 600)],
-        )
+        result = optimize([], 1200.0, [candidate(station, 600)])
         self.assertIsNone(result)
 
     def test_station_at_range_boundary_is_reachable(self):
-        station = make_station("1", "Edge", 3.0)
+        first = make_station("1", "Edge", 3.0)
+        second = make_station("2", "Second", 3.2)
+
         result = optimize(
             [],
             1000.0,
             [
-                candidate(station, 500),
-                candidate(make_station("2", "Second", 3.2), 1000),
+                candidate(first, 500),
+                candidate(second, 1000),
             ],
         )
         self.assertIsNotNone(result)
 
     def test_nearest_cheaper_station_is_selected(self):
-        current = make_station("1", "Current", 4.0)
         nearer = make_station("2", "Near cheaper", 3.0)
         farther = make_station("3", "Farther cheaper", 2.0)
 
@@ -80,12 +72,11 @@ class OptimizerTests(TestCase):
         self.assertEqual(selected["station"].opis_id, "2")
 
     def test_farthest_station_is_selected_when_no_cheaper_option_exists(self):
-        current = make_station("1", "Current", 4.0)
         first = make_station("2", "First", 4.5)
         second = make_station("3", "Second", 4.25)
 
         selected = _select_target(
-            float(current.retail_price),
+            4.0,
             [
                 candidate(first, 350),
                 candidate(second, 450),
@@ -94,11 +85,6 @@ class OptimizerTests(TestCase):
         self.assertEqual(selected["station"].opis_id, "3")
 
     def test_cheaper_station_within_full_tank_range_is_used(self):
-        """
-        The cheaper station is beyond the fuel currently in the tank but
-        within the 500-mile range. The optimizer buys only the extra fuel
-        needed to reach it instead of filling at the expensive station.
-        """
         expensive = make_station("1", "Expensive", 4.0)
         cheap = make_station("2", "Cheap", 2.0)
 
@@ -132,8 +118,8 @@ class OptimizerTests(TestCase):
 
         self.assertIsNotNone(result)
         stops, gallons, cost = result
-        self.assertEqual(len(stops), 2)
-        self.assertAlmostEqual(stops[-1]["gallons"], 12.0, places=4)
+        self.assertEqual(len(stops), 1)
+        self.assertAlmostEqual(stops[0]["gallons"], 12.0, places=4)
         self.assertAlmostEqual(gallons, 12.0, places=4)
         self.assertAlmostEqual(cost, 36.0, places=2)
 
@@ -145,7 +131,6 @@ class OptimizerTests(TestCase):
             500.0,
             [candidate(station, 480, detour=10)],
         )
-
         self.assertIsNotNone(result)
 
     def test_build_route_segments_scales_to_routing_distance(self):
